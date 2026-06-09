@@ -291,8 +291,9 @@ if __name__ == "__main__":
     # outliers removal before splitting on complete and incomplete data.
     cols_to_fix = ['first_Prvskt_thermal_annealing_time', 'Cell_area_measured', 'JV_default_Voc', 'JV_default_Jsc', 'JV_default_FF', 'JV_default_PCE']
     skewed_cols = ['first_Prvskt_thermal_annealing_time']    # variables with long-tails.
-    threshold_pattern = 0.01                                 # threshold to discard those 1% rare patterns.
+    threshold_pattern = 0.005                                 # threshold to discard those 0.5% rare patterns.
     R = 30                                                   # Monte Carlo Repetitions
+    #R = 2
     # -------------------------
 
     # --- read the data ------
@@ -317,7 +318,9 @@ if __name__ == "__main__":
 
     # 2. YOU MUST FIT FIRST
     # This creates the 'colname_to_idx' attribute the error is complaining about
-    mar_model.fit(df_incomplete) 
+    mar_model.fit(df_incomplete)
+
+    from hyperimpute.plugins.imputers import Imputers
 
     the_models = [
         # --- The Mean Baseline ---
@@ -326,7 +329,8 @@ if __name__ == "__main__":
         {'estimator': ExtraTreesRegressor(n_estimators=50, n_jobs=1, random_state=42), 'imputation_order': 'ascending', 'max_iter': 50, 'name': 'MissForest_Extra_50'},
         {'estimator': KNeighborsRegressor(n_neighbors=5), 'max_iter': 50, 'imputation_order': 'ascending', 'name': 'MICE_KNN_5'},
         {'estimator': BayesianRidge(), 'max_iter': 50, 'imputation_order': 'ascending', 'name': 'MICE_Bayesian_Asc'},
-        {'estimator': Ridge(random_state=42), 'max_iter': 50, 'imputation_order': 'ascending', 'name': 'MICE_Ridge'}
+        {'estimator': Ridge(random_state=42), 'max_iter': 50, 'imputation_order': 'ascending', 'name': 'MICE_Ridge'},
+        {'estimator': Imputers().get("miwae"), 'name': 'MIWAE'}
         ]
     
     # --- MAIN EVALUATION LOOP ---
@@ -351,12 +355,23 @@ if __name__ == "__main__":
         # 4. Proceed to Imputation with df_train_miss and df_test_miss...
 
         for config in the_models:
-            imputer = IterativeImputer(estimator=config['estimator'], max_iter=config['max_iter'], random_state=42)
-            imputer = imputer.fit(df_train_miss)
-            test_imputed  = imputer.transform(df_test_miss)
-            df_test_imputed = pd.DataFrame(test_imputed, columns=df_test_true.columns, index=df_test_true.index)
-            if config['name']== 'Mean_Baseline':
-            	mean_imputed_data = df_test_imputed.copy()
+            if config['name']== 'MIWAE':
+                miwae_config = {'batch_size': 64, 'n_epochs': 500, 'latent_size': 2, 'n_hidden': 128, 'K': 1}
+                miwae_model = Imputers().get("miwae", **miwae_config)
+                miwae_model.fit_transform(df_train_miss.copy())
+                df_test_imputed = miwae_model.transform(df_test_miss)
+                if hasattr(df_test_imputed, 'values'):
+                    raw_values = df_test_imputed.values
+                else:
+                    raw_values = df_test_imputed # It's already a numpy array
+                df_test_imputed = pd.DataFrame(raw_values, columns=df_test_true.columns, index=df_test_true.index)
+            else:
+                imputer = IterativeImputer(estimator=config['estimator'], max_iter=config['max_iter'], random_state=42)
+                imputer = imputer.fit(df_train_miss)
+                test_imputed  = imputer.transform(df_test_miss)
+                df_test_imputed = pd.DataFrame(test_imputed, columns=df_test_true.columns, index=df_test_true.index)
+                if config['name']== 'Mean_Baseline':
+                    mean_imputed_data = df_test_imputed.copy()
 
             # calculate metrics:
             normalized_rmse = calculate_mean_nrmse(df_test_true, df_test_imputed, df_test_miss, method='std', verbose=True)
@@ -382,7 +397,7 @@ if __name__ == "__main__":
 
         print(f"Repetition {r+1}/{R} complete.")
         print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
-        with open('all_scores_checkpoint.json', 'w') as f:
+        with open('all_scores.json', 'w') as f:
         	json.dump(all_scores, f)
 
     ## --- POST-PROCESSING EXAMPLES ---
